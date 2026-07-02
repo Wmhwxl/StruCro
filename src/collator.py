@@ -42,7 +42,7 @@ class TrainCollator:
     
         # 根据节点索引在全局图中提取子图
         # 在 __call__ 方法中使用
-        # subgraph, subgraph_indices = self.get_subgraph_with_k_hop(node_indices, k=2)  # 2-hop 邻居
+        subgraph, subgraph_indices = self.get_subgraph_with_k_hop(node_indices, k=2)  # 2-hop 邻居
         subgraph, subgraph_indices = self.get_subgraph(node_indices)
         # 确保 subgraph_indices 和 node_indices 的长度一致，并且不超出 907 节点的限制
         assert len(subgraph_indices) <= subgraph.num_node, "子图节点索引数超过了最大节点数 907"
