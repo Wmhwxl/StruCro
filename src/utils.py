@@ -614,9 +614,9 @@ def bulid_graph_val(split_data):
     unique_relations = sorted(split_data["all"]["display_relation"].unique())
     relation_mapping = {rel: idx for idx, rel in enumerate(unique_relations)}
 
-    split_data["all"]["mapped_relation"] = split_data["all"]["display_relation"].map(relation_mapping)
+    split_data["val"]["mapped_relation"] = split_data["val"]["display_relation"].map(relation_mapping)
 
-    triplets = split_data["all"]
+    triplets = split_data["val"]
     heads = triplets["x_index"].values  
     tails = triplets["y_index"].values   
     relations = triplets["mapped_relation"].values  
