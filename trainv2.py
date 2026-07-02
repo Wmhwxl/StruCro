@@ -26,18 +26,6 @@ from transformers.trainer_utils import (
 )
 from src.utils import build_model_config, compute_metrics
 from src.strucro import StruCro
-from src.rgcn_model import RGCNModel
-from src.graphsage_model import GraphSAGEModel
-from src.gat_model import GATModel
-from src.compgcn_model import CompGCNModel
-from src.dgi_model import DGIModel
-from src.hgt_model import HGTModel
-from src.han_model import HANModel
-# from src.GraphBindingModelv3 import GraphBindingModelv3
-# from src.GraphBindModelv4 import GraphBindingModelv4
-# from src.GraphBindingModelv5 import GraphBindingModelv5
-# source code for the binding model
-from src.model import BindingModel
 from src.dataset import TrainDataset, ValDataset
 from src.collator import TrainCollator, ValCollator
 from src.trainer import BindingTrainer
