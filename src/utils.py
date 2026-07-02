@@ -584,8 +584,34 @@ def add_noise(valid, noise):
 
 
 
+def _get_num_nodes_from_split(split_data, triplets):
+    if "node_all" in split_data and len(split_data["node_all"]) > 0:
+        return int(split_data["node_all"]["node_index"].max()) + 1
+    heads = triplets["x_index"].values
+    tails = triplets["y_index"].values
+    return int(max(max(heads), max(tails))) + 1
+
+
+def _build_graph_from_triplets(split_data, split_key):
+    triplets = split_data[split_key].copy()
+    unique_relations = sorted(triplets["display_relation"].unique())
+    relation_mapping = {rel: idx for idx, rel in enumerate(unique_relations)}
+
+    triplets["mapped_relation"] = triplets["display_relation"].map(relation_mapping)
+    heads = triplets["x_index"].values
+    tails = triplets["y_index"].values
+    relations = triplets["mapped_relation"].values
+
+    triplets_tensor = torch.tensor(list(zip(heads, tails, relations)), dtype=torch.long)
+    num_nodes = _get_num_nodes_from_split(split_data, triplets)
+    graph = data.Graph(triplets_tensor, num_node=num_nodes, num_relation=len(relation_mapping))
+
+    print("Graph successfully created!")
+    return graph
+
+
 def bulid_graph_val(split_data):
-    unique_relations = set(split_data["all"]["display_relation"].values)
+    unique_relations = sorted(split_data["all"]["display_relation"].unique())
     relation_mapping = {rel: idx for idx, rel in enumerate(unique_relations)}
 
     split_data["all"]["mapped_relation"] = split_data["all"]["display_relation"].map(relation_mapping)
@@ -597,7 +623,7 @@ def bulid_graph_val(split_data):
 
     triplets_tensor = torch.tensor(list(zip(heads, tails, relations)), dtype=torch.long)
 
-    num_nodes = max(max(heads), max(tails)) + 1 
+    num_nodes = _get_num_nodes_from_split(split_data, triplets)
     num_relations = len(relation_mapping)  
 
     val_graph = data.Graph(triplets_tensor, num_node=num_nodes, num_relation=num_relations)
@@ -606,29 +632,22 @@ def bulid_graph_val(split_data):
     return val_graph
 
 def bulid_graph_train(split_data):
-    unique_relations = set(split_data["train"]["display_relation"].values)
-    relation_mapping = {rel: idx for idx, rel in enumerate(unique_relations)}
+    return _build_graph_from_triplets(split_data, "train")
 
-    split_data["train"]["mapped_relation"] = split_data["train"]["display_relation"].map(relation_mapping)
 
-    triplets = split_data["train"]
-    heads = triplets["x_index"].values   
-    tails = triplets["y_index"].values   
-    relations = triplets["mapped_relation"].values  
+def bulid_graph_eval_train_only(split_data):
+    """Build a leakage-free propagation graph for evaluation.
 
-    triplets_tensor = torch.tensor(list(zip(heads, tails, relations)), dtype=torch.long)
-
-    num_nodes = max(max(heads), max(tails)) + 1  
-    num_relations = len(relation_mapping)  
-
-    train_graph = data.Graph(triplets_tensor, num_node=num_nodes, num_relation=num_relations)
-
-    print("Graph successfully created!")
-    return train_graph
+    The graph keeps the full node index space from node_all, but contains only
+    training triples as edges. Held-out validation/test triples can still be
+    used by ValDataset as labels for filtered ranking, but not as message
+    passing evidence.
+    """
+    return _build_graph_from_triplets(split_data, "train")
 
 
 def compute_metrics(inputs: EvalPrediction) -> Dict:
-    """Compute the metrics for the prediction, including node type verification."""
+    """Compute the metrics for the prediction."""
     metrics = defaultdict(list)
     predictions_list = inputs.predictions
     num_samples = len(predictions_list)
@@ -651,14 +670,10 @@ def compute_metrics(inputs: EvalPrediction) -> Dict:
         elif key == 'node_type':
             predictions_dict["node_type"] = tensor.tolist()
 
-    node_indices = predictions_dict["node_index"]
     node_types = predictions_dict["node_type"]
     all_tail_types = list(predictions_dict['prediction'].keys())
 
-    # Track node type correctness
-    node_type_accuracies = defaultdict(list)
-
-    # For each tail type (i.e., each relation)
+    # For each tail type
     for tail_type in all_tail_types:
         preds, labels = predictions_dict['prediction'][tail_type], predictions_dict['label'][tail_type]
         total_ranks = []
@@ -668,30 +683,32 @@ def compute_metrics(inputs: EvalPrediction) -> Dict:
         hit_at_10 = []
 
         for i in range(num_samples):
-            node_types_i = node_types[i]  # This is the true node type
+            node_types_i = node_types[i]
             pred, label = preds[i], labels[i]
             label = label[label != -100]  # Filter out invalid labels
-        
             
-            ###### MRR #####
             pred = pred.numpy().flatten()
             label = label.numpy().flatten()
-            ranks = []
+            
+            # Calculate ranks for each true label
+            sample_ranks = []
             for true_label in label:
                 if true_label in pred:
-                    rank = np.where(pred == true_label)[0][0] + 1  # Rank starts from 1
-                    ranks.append(1 / rank)  # Add the reciprocal rank for MRR
-                    # Hit@K calculation
+                    rank = (np.where(pred == true_label)[0][0] + 1)# Get actual rank (1-based)
+                    sample_ranks.append(rank)
+                    
+                    # Calculate standard Hit@K
                     hit_at_1.append(1 if rank <= 1 else 0)
                     hit_at_3.append(1 if rank <= 3 else 0)
                     hit_at_10.append(1 if rank <= 10 else 0)
 
-            if ranks:
-                avg_rank = np.mean(ranks)
-                total_ranks.append(avg_rank)
-                total_weights.append(len(label))  # Weight based on the number of labels
+            if sample_ranks:
+                # Calculate MRR for this sample
+                mrr = np.mean([1.0/rank for rank in sample_ranks])
+                total_ranks.append(mrr)
+                total_weights.append(len(label))
 
-        # Compute MRR, Hit@K metrics
+        # Calculate final metrics
         if total_ranks and total_weights:
             weighted_mrr = np.sum(np.array(total_ranks) * np.array(total_weights)) / np.sum(total_weights)
             metrics[f"head_{node_types_i}_tail_{tail_type}_MRR"].append(weighted_mrr)
@@ -703,10 +720,8 @@ def compute_metrics(inputs: EvalPrediction) -> Dict:
         if hit_at_10:
             metrics[f"head_{node_types_i}_tail_{tail_type}_Hit@10"].append(np.mean(hit_at_10))
 
-
-    # Return the metrics
+    # Return the averaged metrics
     new_metrics = {k: np.mean(v) for k, v in metrics.items()}
-    
     return new_metrics
 
 def build_model_config(data_config):
