@@ -3,7 +3,7 @@ import numpy as np
 from collections import defaultdict
 
 class TrainCollator:
-    def __init__(self, graph, embedding_dict, neg_sample_size=10) -> None:
+    def __init__(self, graph, embedding_dict, neg_sample_size=5) -> None:
         """
         :param graph: The full train graph
         :param embedding_dict: Dictionary mapping node indices to their embeddings
@@ -41,6 +41,8 @@ class TrainCollator:
         node_indices, edge_info, node_types, head_indices, tail_indices = self.get_node_indices_and_types(batch)
     
         # 根据节点索引在全局图中提取子图
+        # 在 __call__ 方法中使用
+        # subgraph, subgraph_indices = self.get_subgraph_with_k_hop(node_indices, k=2)  # 2-hop 邻居
         subgraph, subgraph_indices = self.get_subgraph(node_indices)
         # 确保 subgraph_indices 和 node_indices 的长度一致，并且不超出 907 节点的限制
         assert len(subgraph_indices) <= subgraph.num_node, "子图节点索引数超过了最大节点数 907"
@@ -105,6 +107,11 @@ class TrainCollator:
         
         # 返回构造好的子图以及节点的嵌入和类型
         return dict(outputs)
+    
+    def get_subgraph(self, node_indices):
+        """利用 torchdrug 的 API 从全局图中提取子图"""
+        subgraph = self.graph.subgraph(node_indices)
+        return subgraph, node_indices  # 返回子图和对应的节点索引
 
     def get_node_indices_and_types(self, batch):
         """从 batch 中提取 x_index 和 y_index 的节点集合，并获取节点类型"""
@@ -143,10 +150,42 @@ class TrainCollator:
 
         return node_indices, edge_info, node_types, head_indices, tail_indices
 
-    def get_subgraph(self, node_indices):
-        """利用 torchdrug 的 API 从全局图中提取子图"""
-        subgraph = self.graph.subgraph(node_indices)
-        return subgraph, node_indices  # 返回子图和对应的节点索引
+    def get_subgraph_with_k_hop(self, node_indices, k=2):
+        """利用 k-hop 邻居扩展子图
+        
+        Args:
+            node_indices (list): 初始节点索引列表
+            k (int): 跳数限制，即考虑节点的k跳邻居
+            
+        Returns:
+            tuple: (子图, 扩展后的节点索引列表)
+        """
+        # 将初始节点索引转换为集合，用于快速查找
+        all_nodes = set(node_indices)
+        frontier = set(node_indices)
+        
+        # 迭代k次，每次向外扩展一跳
+        for hop in range(k):
+            next_frontier = set()
+            # 对当前边界中的每个节点
+            for node in frontier:
+                # 获取节点的所有邻居
+                neighbors = self.graph.neighbors(node)
+                # 将新发现的邻居节点添加到下一轮的边界集合中
+                next_frontier.update(n.item() for n in neighbors if n.item() not in all_nodes)
+            # 更新总节点集合和当前边界
+            all_nodes.update(next_frontier)
+            frontier = next_frontier
+            
+            # 如果没有新的节点被添加，提前结束
+            if not frontier:
+                break
+        
+        # 将集合转换回列表并提取子图
+        final_indices = list(all_nodes)
+        subgraph = self.graph.subgraph(final_indices)
+        
+        return subgraph, final_indices
 
     def get_node_embeddings(self, node_indices):
         """根据节点索引获取对应的嵌入"""
