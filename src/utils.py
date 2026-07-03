@@ -592,44 +592,99 @@ def _get_num_nodes_from_split(split_data, triplets):
     return int(max(max(heads), max(tails))) + 1
 
 
-def _build_graph_from_triplets(split_data, split_key):
+def _get_num_relations_from_split(split_data, triplets):
+    relation_frames = []
+    for key in ("all", "triplet_all", "train", "valid", "val", "test"):
+        if key in split_data and "display_relation" in split_data[key]:
+            relation_frames.append(split_data[key]["display_relation"])
+
+    if relation_frames:
+        relations = pd.concat(relation_frames, axis=0).dropna()
+    else:
+        relations = triplets["display_relation"].dropna()
+
+    if len(relations) == 0:
+        return 0
+    return int(relations.astype(int).max()) + 1
+
+
+def _get_heldout_reverse_edge_keys(split_data):
+    heldout_keys = set()
+    for split_key in ("valid", "val", "test"):
+        if split_key not in split_data:
+            continue
+        split_triplets = split_data[split_key]
+        if split_triplets is None or len(split_triplets) == 0:
+            continue
+        for row in split_triplets[["x_index", "y_index", "display_relation"]].itertuples(index=False):
+            head = int(row.x_index)
+            tail = int(row.y_index)
+            relation = int(row.display_relation)
+            heldout_keys.add((head, tail, relation))
+            heldout_keys.add((tail, head, relation))
+    return heldout_keys
+
+
+def _build_graph_from_triplets(split_data, split_key, remove_heldout_reverse_edges=True):
+    """Build a propagation graph from a specified split.
+
+    The graph preserves the global ``display_relation`` IDs instead of
+    remapping relations within the selected split. This keeps graph edge types
+    consistent with relation embeddings and with the relation IDs used by the
+    train/evaluation datasets.
+    """
     triplets = split_data[split_key].copy()
-    unique_relations = sorted(triplets["display_relation"].unique())
-    relation_mapping = {rel: idx for idx, rel in enumerate(unique_relations)}
+    triplets = triplets.drop_duplicates(
+        subset=["x_index", "y_index", "display_relation"]
+    ).reset_index(drop=True)
 
-    triplets["mapped_relation"] = triplets["display_relation"].map(relation_mapping)
-    heads = triplets["x_index"].values
-    tails = triplets["y_index"].values
-    relations = triplets["mapped_relation"].values
+    if remove_heldout_reverse_edges and split_key == "train":
+        heldout_reverse_keys = _get_heldout_reverse_edge_keys(split_data)
+        if heldout_reverse_keys:
+            keep_mask = [
+                (
+                    int(row.x_index),
+                    int(row.y_index),
+                    int(row.display_relation),
+                )
+                not in heldout_reverse_keys
+                for row in triplets[["x_index", "y_index", "display_relation"]].itertuples(index=False)
+            ]
+            removed_count = len(triplets) - int(np.sum(keep_mask))
+            if removed_count > 0:
+                print(
+                    f"Removed {removed_count} train edges that duplicate held-out "
+                    "validation/test edges or their reverse edges."
+                )
+            triplets = triplets.loc[keep_mask].reset_index(drop=True)
 
-    triplets_tensor = torch.tensor(list(zip(heads, tails, relations)), dtype=torch.long)
+    heads = triplets["x_index"].astype(int).values
+    tails = triplets["y_index"].astype(int).values
+    relations = triplets["display_relation"].astype(int).values
+
+    if len(triplets) == 0:
+        triplets_tensor = torch.empty((0, 3), dtype=torch.long)
+    else:
+        triplets_tensor = torch.tensor(list(zip(heads, tails, relations)), dtype=torch.long)
     num_nodes = _get_num_nodes_from_split(split_data, triplets)
-    graph = data.Graph(triplets_tensor, num_node=num_nodes, num_relation=len(relation_mapping))
+    num_relations = _get_num_relations_from_split(split_data, triplets)
+    graph = data.Graph(triplets_tensor, num_node=num_nodes, num_relation=num_relations)
 
-    print("Graph successfully created!")
+    print(
+        f"Graph successfully created from '{split_key}' split only: "
+        f"{len(triplets)} edges, {num_nodes} nodes, {num_relations} relations."
+    )
     return graph
 
 
 def bulid_graph_val(split_data):
-    unique_relations = sorted(split_data["all"]["display_relation"].unique())
-    relation_mapping = {rel: idx for idx, rel in enumerate(unique_relations)}
+    """Build the leakage-free graph used during validation.
 
-    split_data["val"]["mapped_relation"] = split_data["val"]["display_relation"].map(relation_mapping)
-
-    triplets = split_data["val"]
-    heads = triplets["x_index"].values  
-    tails = triplets["y_index"].values   
-    relations = triplets["mapped_relation"].values  
-
-    triplets_tensor = torch.tensor(list(zip(heads, tails, relations)), dtype=torch.long)
-
-    num_nodes = _get_num_nodes_from_split(split_data, triplets)
-    num_relations = len(relation_mapping)  
-
-    val_graph = data.Graph(triplets_tensor, num_node=num_nodes, num_relation=num_relations)
-
-    print("Graph successfully created!")
-    return val_graph
+    Validation/test triples are labels for filtered ranking only. They are not
+    inserted into the propagation graph, so message passing cannot access
+    held-out edges or their reverse counterparts.
+    """
+    return _build_graph_from_triplets(split_data, "train")
 
 def bulid_graph_train(split_data):
     return _build_graph_from_triplets(split_data, "train")
